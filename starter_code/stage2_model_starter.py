@@ -51,8 +51,8 @@ import statsmodels.api as sm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, roc_curve
 
-WORKING_DIR = "."
-os.chdir(WORKING_DIR)
+# WORKING_DIR = "."
+# os.chdir(WORKING_DIR)
 
 # Load PLAID_CLIENT_ID / PLAID_SECRET if .env exists.
 # Python's dotenv is the closest equivalent to R's .Renviron.
@@ -82,23 +82,70 @@ shard0 = read_shard(
     os.path.join(DATA_DIR, "plaid_synth_shard_00.ndjson.gz")
 )
 
-print(len(shard0))  # 500 customers
+# print(len(shard0))  # 500 customers
 
 b = shard0[0]       # One customer bundle
 
 # Equivalent to str(b, max.level = 1)
-print(b.keys())
+# print(b.keys())
 
 # customer_id, item, identity, accounts,
 # transactions, liabilities
 
 # Equivalent to head(as_tibble(b$transactions))
-print(pd.DataFrame(b["transactions"]).head())
+# print("IDENTITY", pd.DataFrame(b["liabilities"]).head())
+
+
+'''
+Customer Data
+dict_keys(['customer_id', 'item', 'identity', 'accounts',
+           'transactions', 'liabilities'])
+
+Transactions
+['transaction_id', 'account_id', 'amount', 'iso_currency_code',
+ 'date', 'name', 'merchant_name', 'payment_channel',
+ 'pending', 'personal_finance_category']
+
+    *payment_channel
+        ['in store', 'other', 'online']
+
+    *personal_finance_category (original nested dictionary)
+        ['primary', 'detailed']
+
+    *personal_finance_category (after extracting into tx)
+        ['pfc_primary', 'pfc_detailed']
+
+Identity
+['names', 'emails']
+
+Accounts
+['account_id', 'balances', 'mask', 'name',
+ 'official_name', 'subtype', 'type']
+
+    *mask = Last few digits of the account number
+
+Liabilities
+['credit', 'student', 'mortgage']
+
+Item
+['item_id', 'institution_id', 'institution_name']
+
+
+NEW DATAFRAME: customer_features(b)
+
+['customer_id', 'inc_mean', 'nsf', 'inc_cv']
+
+    *customer_id = Unique customer identifier
+    *inc_mean = Average monthly income
+    *nsf = Number of overdraft fee transactions
+    *inc_cv = Income volatility (if added)
+
+    One row per customer.
+'''
 
 
 # ============================================================
 # 2. FEATURE ENGINEERING
-# WORKED EXAMPLE: 2 FEATURES; YOU NEED MANY MORE
 # ============================================================
 
 # Remember the Plaid sign convention from Stage 1.
@@ -106,7 +153,7 @@ print(pd.DataFrame(b["transactions"]).head())
 # Negative amount = money entering the account
 # Positive amount = money leaving the account
 
-
+#collectivvely takes the 
 def customer_features(b):
 
     tx = pd.DataFrame(b["transactions"]).copy()
@@ -131,6 +178,7 @@ def customer_features(b):
     # Mean monthly income, identified BY CATEGORY
     # --------------------------------------------------------
 
+    #inc_m consists of |month   amount|
     inc_m = tx[
         (tx["pfc_primary"] == "INCOME") &
         (tx["amount"] < 0)
@@ -148,6 +196,7 @@ def customer_features(b):
 
     inc_mean = inc_m["inc"].mean()
 
+
     # --------------------------------------------------------
     # Example feature 2:
     # Overdraft (NSF) events
@@ -161,15 +210,29 @@ def customer_features(b):
     # Return one row per customer
     # --------------------------------------------------------
 
+    #returns customer we referring to, their mean income, and their average income on all qualifying months.
     return pd.DataFrame({
         "customer_id": [b["customer_id"]],
         "inc_mean": [inc_mean],
         "nsf": [nsf]
     })
 
+#good for variability of how much their income is likely to change given the months that are given in the data set.
+#For example, can mutiply this output to total monthly income to determine variability
+    def income_volatility(inc_m):
+        #takes all rows from inc_m["inc"] and puts it in a mean
+        inc_mean = inc_m["inc"].mean()
+        #takes the standard deviation for all  months for customer
+        inc_std = inc_m["inc"].std(ddof=0)
+        #In case there is no mean or variability
+        if pd.isna(inc_mean) or inc_mean == 0:
+            return None
+        #calculates the coeffiecient of variation
+        return inc_std / inc_mean
+
     # TODO — ideas you should pursue:
-    #
-    # * Income VOLATILITY (CV of monthly income)
+    def payroll_regularity():
+        pass
     #   and payroll regularity
     #
     # * Balance path:
@@ -201,7 +264,7 @@ def customer_features(b):
     #   (W2: "Observing Unobservables")
 
 
-print(customer_features(b))
+print("RUNNING CUSTOMER_FEATURES",customer_features(b))
 
 
 # ============================================================
