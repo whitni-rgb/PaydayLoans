@@ -62,10 +62,24 @@ SUBMISSION_FILENAME = "WageWave_group_07_stage2.csv"
 # ===========================================================================
 
 
-# Six full calendar months before the release's 2026-07-31 data cutoff.
-# This fixed window is earlier than every recorded application date.
+# Pre-registered six-month window, not the full transaction history (which
+# reaches back into 2025). February-July 2026 is a recent, comparable horizon
+# for wage and expense measures, ending before every August/September application.
+# This deliberately trades older evidence / seasonal coverage for recency and
+# comparability; short-file customers use their observed months within the window.
 WINDOW_START = date(2026, 2, 1)
 WINDOW_END = date(2026, 7, 31)
+
+# Pre-registered income policy: WAGES ONLY, not all economic income.
+# Gig payouts (INCOME_OTHER_INCOME) may be genuine resources but are NOT counted
+# as payroll: we specifically measure recurring wages relevant to WageWave's
+# paycheck-cycle repayment hypothesis. Other deposits/transfers are also excluded.
+# An applicant with transactions but no qualifying INCOME_WAGES deposits gets
+# monthly_payroll_income=0; payroll-denominated ratios and volatility are NaN,
+# NOT zero. Payroll regularity is NaN if fewer than three distinct payroll dates.
+# Imputation and missingness indicators are fitted only on labeled training rows.
+WAGE_INCOME_DETAIL = "INCOME_WAGES"
+GIG_INCOME_DETAIL = "INCOME_OTHER_INCOME"  # excluded; retained as an explicit policy marker
 
 
 def deduplicate_transactions(transactions: list[dict]):
@@ -129,10 +143,11 @@ def payroll_feature(bundle: dict) -> dict:
     for _, transaction in in_window:
         pfc = transaction.get("personal_finance_category") or {}
         # Pre-registration commits specifically to payroll, not all inflows.
-        # Other INCOME_* categories (e.g., gig work) are not wage deposits;
-        # TRANSFER_IN_* deposits are excluded too.
+        # The policy excludes INCOME_OTHER_INCOME (gig payouts), which may
+        # represent real earnings but is not wage payroll for this hypothesis.
+        # TRANSFER_IN_* deposits and unrelated inflows are also excluded.
         if (pfc.get("primary") == "INCOME"
-                and pfc.get("detailed") == "INCOME_WAGES"
+                and pfc.get("detailed") == WAGE_INCOME_DETAIL
                 and float(transaction["amount"]) < 0):
             total_payroll -= float(transaction["amount"])
             count_payroll += 1
@@ -205,7 +220,7 @@ def income_regularity_feature(bundle: dict) -> dict:
         pfc = tx.get("personal_finance_category") or {}
         if (
             pfc.get("primary") == "INCOME"
-            and pfc.get("detailed") == "INCOME_WAGES"
+            and pfc.get("detailed") == WAGE_INCOME_DETAIL
             and float(tx["amount"]) < 0
         ):
             pay_dates.add(day)
@@ -309,7 +324,7 @@ def income_volatility_feature(bundle: dict) -> dict:
         category = tx.get("personal_finance_category") or {}
         if (
             category.get("primary") == "INCOME"
-            and category.get("detailed") == "INCOME_WAGES"
+            and category.get("detailed") == WAGE_INCOME_DETAIL
             and float(tx["amount"]) < 0
         ):
             month_wages[month_id(day.year, day.month)] -= float(tx["amount"])
@@ -425,7 +440,7 @@ def spending_to_income_feature(bundle: dict) -> dict:
         detailed = category.get("detailed")
         amount = float(tx["amount"])
 
-        if primary == "INCOME" and detailed == "INCOME_WAGES" and amount < 0:
+        if primary == "INCOME" and detailed == WAGE_INCOME_DETAIL and amount < 0:
             payroll_total -= amount
 
         # Positive Plaid amounts are account outflows. Do not mistake
@@ -1141,6 +1156,10 @@ def model_table() -> None:
     if not outcomes["default_12m"].isin([0, 1]).all():
         raise ValueError("Outcome column must contain only 0/1")
 
+    # Use approved/took_up ONLY to verify outcome-file provenance, not to
+    # select the training sample or as predictors, imputers, feature-selection
+    # inputs, or segmentation variables. The label file alone defines training
+    # eligibility; group is never loaded into any modeling table.
     # Validate that labels originate exclusively from booked historical loans.
     booked = applications.loc[
         (applications["approved"] == 1) & (applications["took_up"] == 1),
@@ -1403,6 +1422,31 @@ def preprocessing_metadata(pipe: Pipeline) -> dict:
     return {
         "pre_registered_substantive_features": list(FEATURES),
         "added_substantive_features_after_preregistration": [],
+        "overdraft_utilization_debt_service_features_added": False,
+        "income_policy": (
+            f"Wage payroll only: INCOME/{WAGE_INCOME_DETAIL} negative-amount "
+            f"deposits. Gig payouts in {GIG_INCOME_DETAIL} and transfers are "
+            "excluded from wage measures, though they may be genuine income."
+        ),
+        "no_qualifying_payroll_policy": (
+            "With transaction history but no qualifying wages, monthly payroll "
+            "income is 0; volatility and wage-denominated ratios are NaN, "
+            "not 0. Regularity is NaN with fewer than three payroll dates. "
+            "Missing values are imputed on labeled training data only, with "
+            "learned indicators for available missing-feature patterns."
+        ),
+        "observation_window": (
+            "2026-02-01 through 2026-07-31, pre-registered six-month recent "
+            "horizon before applications; shorter histories use observed months. "
+            "Older release transactions are omitted by design, trading longer "
+            "history/seasonality for recency and comparable observation."
+        ),
+        "excluded_input_policy": (
+            "group and approved/offered_apr/took_up are not inputs to feature "
+            "construction, imputation, selection, segmentation, or modeling. "
+            "approved/took_up are read only to verify label provenance, "
+            "not to define training membership."
+        ),
         "added_preprocessing_terms": indicator_terms,
         "added_preprocessing_term_count": len(indicator_terms),
         "added_preprocessing_term_rationale": (
@@ -1537,7 +1581,7 @@ def read_model_table(path: Path, *, labels: bool) -> pd.DataFrame:
     return df
 
 
-def holdout_validation() -> None:
+def train_score() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     labeled = read_model_table(OUTPUT_DIR / "labeled_model_data.csv", labels=True)
     pending = read_model_table(OUTPUT_DIR / "pending_model_data.csv", labels=False)
@@ -1677,8 +1721,8 @@ def main() -> None:
     for task_name, runner in [
         ("Payroll", payroll), ("Income Regularity", income_regularity), ("Income Volatility", income_volatility),
         ("Spending to Income", spending_to_income), ("Cash Buffer", cash_buffer), ("Employment Tenure", employment_tenure),
-        ("Income Discrepancy", income_discrepancy), ("Housing Payment Burden", housing_burden), ("Model Table", model_table),
-        ("Training and Validation", train_validate), ("Holdout Validation", holdout_validation),
+        ("Income Discrepancy", income_discrepancy), ("Housing Burden", housing_burden), ("Model Table", model_table),
+        ("Training and Validation", train_validate), ("Training and Scoring", train_score),
     ]:
         print(f"\n{'=' * 72}\nRunning {task_name}", flush=True)
         runner()
